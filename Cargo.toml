@@ -2,6 +2,17 @@
 name = "serial_mcp_tui"
 version = "0.1.0"
 edition = "2024"
+autobins = false
+
+[[bin]]
+name = "serial_mcp_gui"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[[bin]]
+name = "serial_mcp_tui"
+path = "src/tui_main.rs"
+required-features = ["tui"]
 
 [features]
 default = ["gui", "mcp"]

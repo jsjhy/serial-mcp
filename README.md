@@ -1,13 +1,13 @@
 # Serial Monitor — WinAPI GUI + MCP
 
-Windows 11 原生串口工具：**WinAPI GUI + 人工收发 + 可读文本日志 + MCP server**。界面由 User32 和系统 RichEdit 实现，保留 Rust 串口/MCP 核心，不使用 WebView、Qt 或 Electron。可执行文件名为兼容既有启动配置继续使用 `serial_mcp_tui.exe`，默认启动 GUI，没有控制台窗口。旧 TUI 源码与可选构建保留，迁移前的 Git 基线为 `b8445a5`。
+Windows 11 串口工具分为两个独立版本：`serial_mcp_gui.exe`（原生 WinAPI GUI，无控制台）和 `serial_mcp_tui.exe`（控制台 TUI，保留快捷键）。两版共用 Rust 串口、日志和 MCP 核心；GUI 使用 User32 和系统 RichEdit，不使用 WebView、Qt 或 Electron。迁移前的 Git 基线为 `b8445a5`。GUI 不再注册 TUI 功能快捷键或显示快捷键提示。
 
 ## 功能清单（对应需求）
 
 | 需求 | 实现 |
 |---|---|
 | 串口双向收发 | 非阻塞读 / 独立写，读线程 + 写线程 channel 解耦，互不阻塞 |
-| 人工输入到串口 | GUI 显示区末尾直接输入，回车发送，↑/↓ 历史，Ctrl+H/h 同步切换 input/view 的 ASCII/Hex；文本保留 UTF-8 并支持 `\r \n \t \0 \\ \xNN` 转义，行尾由 EOL 设置 |
+| 人工输入到串口 | GUI 显示区末尾直接输入，回车发送，通过按钮同步切换 input/view 的 ASCII/Hex；文本保留 UTF-8 并支持 `\r \n \t \0 \\ \xNN` 转义，行尾由 EOL 按钮设置 |
 | 日志文件保存 | 环形缓冲防丢（计数不静默丢）+ 异步落盘 + 按大小轮转 + 按天数清理，固定 UTF-8，带时间戳 + TX/RX/STATUS 方向 |
 | GUI | 原生串口/波特率组合框、连接按钮、RichEdit 显示/输入、串口与 MCP 状态栏 |
 | ASCII 视图 ANSI 颜色 | GUI 显示 SGR 前景色（16/256/真彩色），跨包保留 UTF-8/ANSI 状态；时间戳降低对比度；Hex 显示原始字节。GUI 不模拟清屏/光标控制或粗体/下划线/反显 |
@@ -18,24 +18,29 @@ Windows 11 原生串口工具：**WinAPI GUI + 人工收发 + 可读文本日志
 
 ```powershell
 cargo build --release --offline
-# 或旧 TUI + MCP：cargo build --release --offline --no-default-features --features tui,mcp
-# 或仅 MCP：cargo build --no-default-features --features mcp
+# 同时编译两个 EXE：
+cargo build --release --offline --all-features
+# 仅 TUI + MCP（不引入 GUI 依赖）：
+cargo build --release --offline --no-default-features --features tui,mcp --bin serial_mcp_tui
+# 只运行 MCP：两版均支持 --mode mcp
 ```
 
-`.cargo/config.toml` 为 Windows x64 GNU/MSVC 配置静态 CRT；GNU 额外传递 `-static`。Rust 代码及第三方库编入 EXE，系统 DLL（User32、GDI、DWM、Winsock、系统 CRT、系统自带 `Msftedit.dll` 等）仍由 Windows 提供，无需附带 VC++、GCC、Qt 或 WebView 运行库。可用 `objdump -p target/release/serial_mcp_tui.exe` 检查 PE 导入表。默认 GUI 构建为 Windows GUI 子系统；需要控制台帮助/旧 TUI 时使用不带 `gui` feature 的构建。
+`.cargo/config.toml` 为 Windows x64 GNU/MSVC 配置静态 CRT；GNU 额外传递 `-static`。Rust 代码及第三方库编入 EXE，系统 DLL（User32、GDI、DWM、Winsock、系统 CRT、系统自带 `Msftedit.dll` 等）仍由 Windows 提供，无需附带 VC++、GCC、Qt 或 WebView 运行库。可用 `objdump -p target/release/serial_mcp_gui.exe` 检查 PE 导入表。GUI EXE 使用 Windows GUI 子系统，TUI EXE 使用 Windows Console 子系统，即使 all-features 同时编译也不会混淆。
 
 `build.rs` 将 `gui.manifest` 嵌入 EXE，启用系统 Common Controls v6 样式与系统 DPI 感知；GNU 构建需要工具链自带的 `windres`，MSVC 构建需要 Windows SDK 的 `rc.exe`。这些是构建工具，不随运行程序分发。GUI 默认构建不启用终端输入后端，ANSI 解析只复用 ratatui 的文本/样式数据类型。
 
 验证：`cargo test --offline --all-features` 覆盖原生隐藏 RichEdit、GUI 编码/跨包显示、旧 TUI 和 MCP；`./verify-restart.ps1` 验证独立 MCP 进程真实重启，`./verify-restart.ps1 -Mode both` 另外检查重启前后的真实 GUI 窗口。原生控件测试不访问真实串口、不覆盖剪贴板，不代表长期运行验证。
 
+资源检查：`cargo test --offline --bin serial_mcp_gui native_resource_counts_stay_bounded -- --nocapture --test-threads=1` 在预热后重复创建/销毁 100 个隐藏原生窗口，并比较 GDI、USER、进程句柄计数。曾测得 16→16、10→10、214→214，系统初始化和并行测试会影响绝对值。离线重连线程会检查核心弱引用和连接代次，核心释放或连接切换后在退避期间每 20ms 检查取消，不再一直持有 Shared/日志资源。另有回归测试确认 Shared 最终释放。文件写入和 TX 队列仍为无界队列：持续生产快于消费时存在内存积压风险，不能把窗口计数稳定等同于所有负载下都无内存增长。MCP 使用依赖默认的五分钟会话空闲超时，显式 DELETE 可立即结束会话。
+
 ## 运行
 
 ```powershell
 # GUI + MCP 同时运行（默认）
-.\target\release\serial_mcp_tui.exe --port COM3 --baud 115200
+.\target\release\serial_mcp_gui.exe --port COM3 --baud 115200
 
 # 仅 GUI（人工调试）
-.\target\release\serial_mcp_tui.exe --mode gui --port COM3
+.\target\release\serial_mcp_gui.exe --mode gui --port COM3
 
 # 仅 MCP server（给 AI 用，走 HTTP，不占用终端）
 .\target\release\serial_mcp_tui.exe --mode mcp --mcp-port 8010
@@ -47,7 +52,7 @@ cargo build --release --offline
 |---|---|---|
 | `-p, --port` | 空 | 串口号（如 COM3） |
 | `-b, --baud` | 115200 | 波特率 |
-| `--mode` | both | gui / mcp / both；tui 需要旧 TUI feature，both 优先选择 GUI |
+| `--mode` | both | both 启动当前 EXE 对应界面 + MCP；GUI 版支持 gui，TUI 版支持 tui，两版均支持 mcp |
 | `--log-dir` | logs | 日志目录 |
 | `--log-rotate` | 10485760 | 单文件轮转上限（字节） |
 | `--log-keep-days` | 30 | 日志保留天数 |
@@ -98,7 +103,7 @@ mcp_port = 8010
 
 顶部选择或输入串口、波特率，点击 `Connect` / `Disconnect`；`Refresh` 刷新端口列表（后台也每秒刷新）。串口状态为 `CONNECTED`、`DISCONNECTED`、`NOT_FOUND`，操作错误显示在状态旁；`log:` 显示当前文本日志文件名。底部单行显示完整 MCP 服务/会话信息。
 
-直接在显示区末尾设备提示符之后输入，不设独立输入行。`Enter` 等待串口驱动写入回执后清空草稿，失败保留；空输入在文本模式下也发送配置行尾。`Ctrl+H` 切换 ASCII/Hex，`Ctrl+E` 循环行尾，`Ctrl+K` 或 `Clear` 清空显示并保留草稿，`Ctrl+R` 按顶部当前端口/波特率连接，`Ctrl+X` 退出。↑/↓ 浏览命令历史；左右键、Home/End 使用原生编辑行为，鼠标滚轮和原生横纵滚动条查看历史/长行。窗口最顶部独立显示快捷键提示，启动后输入焦点位于显示区末尾。
+直接在显示区末尾设备提示符之后输入，不设独立输入行。`Enter` 等待串口驱动写入回执后清空草稿，失败保留；空输入在文本模式下也发送配置行尾。GUI 通过 ASCII/HEX、EOL、Clear、Connect、Disconnect、Refresh 按钮操作，使用窗口关闭按钮退出，没有自定义功能快捷键或命令历史按键。方向键、Home/End、复制/剪切/粘贴保留原生编辑行为；鼠标滚轮和原生横纵滚动条查看历史/长行，启动后焦点位于显示区末尾。
 
 鼠标拖动选择文字，右键或 `Ctrl+C` 复制；历史不可修改，点击历史后直接打字会跳至草稿末尾。选中历史期间暂停显示刷新，文件日志和 MCP 继续；超出广播容量时提示显示跳过事件，原始文件日志不依赖这个广播。接收插入在草稿之前，保留原生选区与阅读滚动位置。跨接收批次的撤销与 Ctrl+Backspace 删词被禁用，以保护历史/草稿边界。
 
@@ -183,16 +188,17 @@ claude mcp add serial -- "C:\path\to\serial_mcp_tui.exe" --mode mcp
 
 ## 发布产物
 
-`dist/` 是可直接分发的目录（先 `cargo build --release`，再将 `target/release/serial_mcp_tui.exe` 与 README 复制到此目录）：
+`dist/` 是可直接分发的目录（先 `cargo build --release --offline --all-features`，再将两个 EXE 与 README 复制到此目录）：
 
 ```
 dist/
-├── serial_mcp_tui.exe   # 单文件可执行程序
+├── serial_mcp_gui.exe   # WinAPI GUI，无自定义功能快捷键
+├── serial_mcp_tui.exe   # 控制台 TUI，保留快捷键
 ├── config.toml          # 示例配置（与 exe 同目录时自动加载）
 └── README.md
 ```
 
-双击 `serial_mcp_tui.exe` 即可启动（自动读取同目录 `config.toml`，无配置文件则默认 `--mode both`）。
+双击所需版本的 EXE 即可启动（自动读取同目录 `config.toml`，无配置文件则默认 `--mode both`）。默认 MCP 端口均为 8010；同时运行时应分配不同 MCP 端口，同一个串口通常也不能由两个进程同时打开。
 
 启动时优先连接配置或命令行指定的端口；未指定且系统只有一个可用串口时自动连接，波特率使用合并后的配置。存在多个串口时通过 GUI 顶部组合框选择；旧 TUI 使用 Ctrl+O。
 
@@ -200,7 +206,9 @@ dist/
 
 ```
 src/
-├── main.rs         # CLI + 配置合并（命令行>配置>默认）+ 模式编排 + watch 热加载
+├── main.rs         # GUI EXE 入口，Windows GUI 子系统
+├── tui_main.rs     # TUI EXE 入口，控制台子系统
+├── entry.rs        # 共用 CLI / 配置合并 / 生命周期编排 / watch 热加载
 ├── config.rs       # TOML 配置文件解析与优先级合并
 ├── gui.rs          # WinAPI 原生窗口 / RichEdit / 输入边界保护（feature: gui）
 ├── codec.rs        # hex 解析 + ascii 转义解码（TUI/MCP 共用）

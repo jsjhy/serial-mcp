@@ -1,8 +1,9 @@
 # 隔离的 Windows 进程重启回归：使用系统分配端口和无效串口名，不访问真实设备。
 # 覆盖真实 HTTP 回复、重复请求、旧 PID 退出、新 PID 启动与重新握手；不验证长期稳定性。
-param([ValidateSet('mcp', 'both')][string]$Mode = 'mcp')
+param([ValidateSet('mcp', 'both')][string]$Mode = 'mcp', [ValidateSet('gui', 'tui')][string]$Binary = 'gui')
 $ErrorActionPreference = 'Stop'
-$exePath = (Resolve-Path -LiteralPath 'target/release/serial_mcp_tui.exe').Path
+$exeName = "serial_mcp_$Binary.exe"
+$exePath = (Resolve-Path -LiteralPath "target/release/$exeName").Path
 $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
 $listener.Start()
 $testPort = $listener.LocalEndpoint.Port
@@ -21,7 +22,7 @@ function Initialize-Session {
 }
 
 function Find-TestProcesses {
-    Get-CimInstance Win32_Process -Filter "Name = 'serial_mcp_tui.exe'" | Where-Object {
+    Get-CimInstance Win32_Process -Filter "Name = '$exeName'" | Where-Object {
         $_.ExecutablePath -eq $exePath -and $_.CommandLine -match "--mcp-port $testPort(?:\s|$)"
     }
 }

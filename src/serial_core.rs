@@ -290,7 +290,7 @@ impl SerialCore {
                             log_status(&shared, &msg);
                             // 置空端口，进入重连（若期间有新 open/close 请求，重连会自动放弃）
                             rt.block_on(shared.port.lock()).take();
-                            reconnect(&rt, &shared, &events);
+                            reconnect(&rt, &shared, &events, &core_weak);
                         }
                     }
                 }
@@ -403,26 +403,32 @@ fn open_port_bare_name(cfg: &SerialConfig) -> std::io::Result<SerialPort> {
 
 /// 重连：读到错误（设备拔出/休眠恢复）后循环尝试 reopen，带退避。
 /// 期间若发生 open/close（代次变化），立即放弃，避免和新请求争抢句柄。
+/// 核心释放同样取消重连；退避切成不超过 20ms 的片段，避免后台线程持有日志长时间存活。
 fn reconnect(
     rt: &tokio::runtime::Handle,
     shared: &Arc<Shared>,
     events: &broadcast::Sender<SerialEvent>,
+    core: &std::sync::Weak<SerialCore>,
 ) {
     // 固定本轮重连的配置和代次；外部 open/close 变化后不能再使用旧配置覆盖连接。
     // 退避从 300ms 开始倍增到 3s，避免设备离线时持续占满 CPU/刷屏。
     let cfg = rt.block_on(shared.config.lock()).clone();
     let gen_at = shared.switch_gen.load(Ordering::SeqCst);
+    let cancelled = || core.strong_count() == 0 || shared.switch_gen.load(Ordering::SeqCst) != gen_at;
     let mut backoff = 300u64;
     loop {
-        if shared.switch_gen.load(Ordering::SeqCst) != gen_at {
+        if cancelled() {
             return;
         }
         let msg = format!("reconnecting {} ...", cfg.port);
         let _ = events.send(SerialEvent::Status { msg });
-        std::thread::sleep(std::time::Duration::from_millis(backoff));
+        for _ in 0..backoff / 20 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            if cancelled() { return; }
+        }
         match open_port(&cfg) {
             Ok(port) => {
-                if shared.switch_gen.load(Ordering::SeqCst) != gen_at {
+                if cancelled() {
                     return; // 新请求已接管，丢弃本次重连句柄
                 }
                 *rt.block_on(shared.port.lock()) = Some(Arc::new(port));
@@ -450,6 +456,33 @@ fn log_status(shared: &Arc<Shared>, msg: &str) {
 /// 这些测试不代替真实 COM 口上的收发、拔插和休眠恢复验证。
 mod tests {
     use super::is_path_error;
+
+    /// 无效端口模拟离线重连；核心释放后线程必须退出并释放 Shared，不使用真实 COM 口。
+    #[test]
+    fn reconnect_releases_shared_after_core_is_dropped() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let core = { let _guard = runtime.enter(); super::SerialCore::start(None) };
+        runtime.block_on(async { core.shared.config.lock().await.port = "COM_RESOURCE_TEST_INVALID".into(); });
+        let shared = core.shared.clone();
+        let weak_shared = std::sync::Arc::downgrade(&shared);
+        let weak_core = std::sync::Arc::downgrade(&core);
+        let events = core.events.clone();
+        let handle = runtime.handle().clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            super::reconnect(&handle, &shared, &events, &weak_core);
+            drop(shared);
+            let _ = done_tx.send(());
+        });
+        drop(core);
+        done_rx.recv_timeout(std::time::Duration::from_secs(2)).expect("reconnect must stop after core drop");
+        worker.join().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while weak_shared.strong_count() != 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(weak_shared.strong_count(), 0, "reader/writer must release shared resources");
+    }
 
     #[tokio::test]
     async fn disconnected_send_reports_actual_failure() {

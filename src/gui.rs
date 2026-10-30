@@ -258,7 +258,6 @@ struct App {
     baud: HWND,
     status: HWND,
     log_status: HWND,
-    help: HWND,
     mcp: HWND,
     buttons: Vec<(usize, HWND)>,
     font: HFONT,
@@ -278,9 +277,6 @@ struct App {
     notice: String,
     pending: bool,
     max_chars: i32,
-    history: Vec<String>,
-    history_at: usize,
-    draft: String,
 }
 
 impl App {
@@ -351,7 +347,6 @@ impl App {
         // SS_LEFTNOWORDWRAP：连接错误再长也不挤掉独立的日志文件名一行。
         self.status = self.control("STATIC", "", 0x000c, 0)?;
         self.log_status = self.control("STATIC", "", 0x000c, 0)?;
-        self.help = self.control("STATIC", "Enter send   Ctrl+H ASCII/HEX   Ctrl+E EOL   Ctrl+K clear   Ctrl+X exit   Right-click copy", 0x000c, 0)?;
         self.mcp = self.control("STATIC", "", 0, 0)?;
         self.terminal = self.control(
             "RICHEDIT50W",
@@ -417,18 +412,17 @@ impl App {
         GetClientRect(self.window, &mut rect);
         let w = rect.right;
         let h = rect.bottom;
-        MoveWindow(self.help, 12, 8, w - 24, 24, 1);
-        MoveWindow(self.port, 12, 42, 180, 300, 1);
-        MoveWindow(self.baud, 202, 42, 110, 300, 1);
+        MoveWindow(self.port, 12, 12, 180, 300, 1);
+        MoveWindow(self.baud, 202, 12, 110, 300, 1);
         let mut x = 322;
         for (id, hwnd) in &self.buttons {
             let width = if *id == DISCONNECT { 100 } else { 92 };
-            MoveWindow(*hwnd, x, 40, width, 30, 1);
+            MoveWindow(*hwnd, x, 10, width, 30, 1);
             x += width + 8;
         }
-        MoveWindow(self.status, 12, 80, w - 24, 24, 1);
-        MoveWindow(self.log_status, 12, 106, w - 24, 24, 1);
-        MoveWindow(self.terminal, 12, 136, w - 24, (h - 178).max(20), 1);
+        MoveWindow(self.status, 12, 50, w - 24, 24, 1);
+        MoveWindow(self.log_status, 12, 76, w - 24, 24, 1);
+        MoveWindow(self.terminal, 12, 106, w - 24, (h - 148).max(20), 1);
         MoveWindow(self.mcp, 12, h - 32, w - 24, 24, 1);
     }
 
@@ -672,13 +666,6 @@ impl App {
             self.notice = "not connected; choose a port and Connect".into();
             return;
         }
-        if !draft.is_empty() && self.history.last() != Some(&draft) {
-            self.history.push(draft);
-            if self.history.len() > 100 {
-                self.history.remove(0);
-            }
-        }
-        self.history_at = self.history.len();
         self.pending = true;
         let core = self.core.clone();
         let tx = self.tx.clone();
@@ -809,7 +796,6 @@ unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize) 
         return CallWindowProcW((*ptr).old_edit_proc, hwnd, msg, wp, lp);
     }
     let app = &mut *ptr;
-    let ctrl = GetKeyState(VK_CONTROL as i32) < 0;
     let range = selection(hwnd);
     if msg == WM_CONTEXTMENU {
         if range.start != range.end {
@@ -818,31 +804,6 @@ unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize) 
         return 0;
     }
     if msg == WM_KEYDOWN {
-        if ctrl {
-            match wp as u16 {
-                0x58 => {
-                    PostMessageW(app.window, WM_CLOSE, 0, 0);
-                    return 0;
-                }
-                0x4b => {
-                    app.clear();
-                    return 0;
-                }
-                0x48 => {
-                    app.command(MODE);
-                    return 0;
-                }
-                0x45 => {
-                    app.command(EOL);
-                    return 0;
-                }
-                0x52 => {
-                    app.command(CONNECT);
-                    return 0;
-                }
-                _ => {}
-            }
-        }
         if wp == VK_RETURN as usize {
             app.send();
             return 0;
@@ -850,29 +811,10 @@ unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: usize, lp: isize) 
         if wp == VK_DELETE as usize && (range.start < app.input_start || app.pending) {
             return 0;
         }
-        if (wp == VK_UP as usize || wp == VK_DOWN as usize)
-            && range.start >= app.input_start
-            && !app.pending
-        {
-            if app.history_at == app.history.len() {
-                app.draft = app.draft();
-            }
-            if wp == VK_UP as usize {
-                app.history_at = app.history_at.saturating_sub(1);
-            } else {
-                app.history_at = (app.history_at + 1).min(app.history.len());
-            }
-            let value = app
-                .history
-                .get(app.history_at)
-                .unwrap_or(&app.draft)
-                .clone();
-            app.replace_draft(&value);
-            return 0;
-        }
     }
     if msg == WM_CHAR {
-        if wp == 13 || (ctrl && matches!(wp, 5 | 8 | 11 | 18 | 24)) {
+        // 只保留原生编辑控制字符，不把旧 TUI 功能快捷键映射到 GUI 操作。
+        if wp == 13 || (wp < 32 && !matches!(wp, 1 | 3 | 8 | 9 | 22 | 24 | 26)) {
             return 0;
         }
         if app.pending && wp != 3 {
@@ -1002,7 +944,6 @@ unsafe fn create_app(
         baud: null_mut(),
         status: null_mut(),
         log_status: null_mut(),
-        help: null_mut(),
         mcp: null_mut(),
         buttons: Vec::new(),
         font: null_mut(),
@@ -1021,9 +962,6 @@ unsafe fn create_app(
         notice,
         pending: false,
         max_chars: (config.max_lines.unwrap_or(500).clamp(50, 2000) * 1024) as i32,
-        history: Vec::new(),
-        history_at: 0,
-        draft: String::new(),
     });
     let class_name = wide("SerialMonitorWin32");
     let mut class: WNDCLASSEXW = zeroed();
@@ -1038,7 +976,7 @@ unsafe fn create_app(
         0,
         class_name.as_ptr(),
         wide(&format!(
-            "Serial Monitor — WinAPI | {} | Ctrl+H mode | Ctrl+K clear | Ctrl+X exit",
+            "Serial Monitor — WinAPI | {}",
             config.theme.unwrap_or_default().name()
         ))
         .as_ptr(),
@@ -1131,10 +1069,80 @@ pub fn run(handle: Handle, core: Arc<SerialCore>, config: TuiConfig) -> io::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    static NATIVE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 真实窗口/GDI 资源重复创建销毁；预热排除系统控件缓存，不访问串口或剪贴板。
+    /// 计数仅覆盖本进程的这条窗口路径；容许全量并行测试中少量系统临时句柄波动。
+    #[test]
+    fn native_resource_counts_stay_bounded_over_100_windows() {
+        let _lock = NATIVE_TEST_LOCK.lock().unwrap();
+        unsafe extern "system" {
+            fn GetCurrentProcess() -> HANDLE;
+            fn GetProcessHandleCount(process: HANDLE, count: *mut u32) -> i32;
+        }
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn GetGuiResources(process: HANDLE, flags: u32) -> u32;
+        }
+        let counts = || unsafe {
+            let process = GetCurrentProcess();
+            let mut handles = 0;
+            assert_ne!(GetProcessHandleCount(process, &mut handles), 0);
+            (
+                GetGuiResources(process, 0),
+                GetGuiResources(process, 1),
+                handles,
+            )
+        };
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let core = {
+            let _guard = runtime.enter();
+            SerialCore::start(None)
+        };
+        let cycle = || unsafe {
+            let mut window =
+                create_app(runtime.handle().clone(), core.clone(), TuiConfig::default()).unwrap();
+            window.app.replace_draft("resource test 中文😀");
+            window.app.apply(Patch {
+                remove: 0,
+                spans: vec![("test line\r".repeat(100), window.app.palette.fg)],
+            });
+            window.app.clear();
+            drop(window);
+            // DestroyWindow 投递的 WM_QUIT 不应留给下一个窗口的消息循环。
+            let mut msg: MSG = zeroed();
+            while PeekMessageW(&mut msg, null_mut(), WM_QUIT, WM_QUIT, PM_REMOVE) != 0 {}
+        };
+        for _ in 0..5 {
+            cycle();
+        }
+        let before = counts();
+        for _ in 0..100 {
+            cycle();
+        }
+        let after = counts();
+        println!(
+            "100 window cycles: GDI {} -> {}, USER {} -> {}, handles {} -> {}",
+            before.0, after.0, before.1, after.1, before.2, after.2
+        );
+        assert!(
+            after.0 <= before.0 + 4,
+            "GDI objects grow with window cycles"
+        );
+        assert!(
+            after.1 <= before.1 + 4,
+            "USER objects grow with window cycles"
+        );
+        assert!(
+            after.2 <= before.2 + 32,
+            "process handles grow with window cycles"
+        );
+    }
     /// 在真实 RichEdit 控件上验证 UTF-16 输入边界、历史保护、样式和滚动条。
     /// 窗口不显示，不连接串口，不改系统剪贴板；这不是长期运行或设备收发测试。
     #[test]
     fn native_richedit_preserves_draft_and_history_boundaries() {
+        let _lock = NATIVE_TEST_LOCK.lock().unwrap();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let core = {
             let _guard = runtime.enter();
