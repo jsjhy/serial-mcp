@@ -1,0 +1,26 @@
+# serial-mcp-tui 配置示例：放在 exe 同目录时自动加载，也可 --config 指定。
+# 优先级：命令行 > 配置文件 > 内置默认。
+
+# 串口（不填则 TUI 内用 Ctrl+R 连接唯一可用串口，或用 Ctrl+O 手输串口名 / --port 指定）
+# port = "COM9"
+baud = 115200
+
+# 运行模式：both / tui / mcp
+mode = "both"
+
+# 日志：目录、单文件轮转上限（字节）、保留天数、落盘双阈值
+log_dir = "logs"
+log_rotate = 10485760
+log_keep_days = 30
+log_flush_bytes = 4096
+log_flush_ms = 100
+
+# MCP server HTTP 端口（端点 http://127.0.0.1:<port>/mcp）
+mcp_port = 8010
+
+# TUI 默认显示（可选，删掉即用默认值）
+[tui]
+theme = "dark"    # dark / light / nord / solarized；修改后重启生效
+hex_view = false   # 数据视图默认 ascii
+input_hex = false  # 输入默认 ascii
+max_lines = 500
