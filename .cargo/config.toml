@@ -1,0 +1,7 @@
+# MSVC 静态 CRT：发布文件不依赖额外安装的 VC++ 运行库；Windows 系统 DLL 仍由系统提供。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# 当前机器使用 GNU 工具链；静态链接 GCC/线程支持库，仍保留 Windows 系统 DLL 导入。
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=-static"]

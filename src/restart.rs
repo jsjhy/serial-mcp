@@ -77,8 +77,10 @@ fn wait_and_launch(pid: u32, args: Vec<std::ffi::OsString>) -> std::io::Result<(
         result
     };
     if result != 0 { return Err(std::io::Error::other("parent exit wait failed or timed out")); }
+    // GUI 子系统自身创建窗口；旧 TUI 构建才需要新的控制台。
+    let flags = if cfg!(feature = "gui") { 0 } else { 0x00000010 };
     std::process::Command::new(std::env::current_exe()?).args(args)
-        .creation_flags(0x00000010) // CREATE_NEW_CONSOLE：新 TUI 使用可见控制台。
+        .creation_flags(flags)
         .spawn()?;
     Ok(())
 }

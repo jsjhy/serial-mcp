@@ -1,35 +1,41 @@
-# serial-mcp-tui
+# Serial Monitor — WinAPI GUI + MCP
 
-串口调试工具（Rust）：**人工收发 + 环形缓冲日志 + TUI + MCP server**。平台目标 **Win11**（TUI 请在 **Windows Terminal** 下运行）。
+Windows 11 原生串口工具：**WinAPI GUI + 人工收发 + 可读文本日志 + MCP server**。界面由 User32 和系统 RichEdit 实现，保留 Rust 串口/MCP 核心，不使用 WebView、Qt 或 Electron。可执行文件名为兼容既有启动配置继续使用 `serial_mcp_tui.exe`，默认启动 GUI，没有控制台窗口。旧 TUI 源码与可选构建保留，迁移前的 Git 基线为 `b8445a5`。
 
 ## 功能清单（对应需求）
 
 | 需求 | 实现 |
 |---|---|
 | 串口双向收发 | 非阻塞读 / 独立写，读线程 + 写线程 channel 解耦，互不阻塞 |
-| 人工输入到串口 | TUI 输入区，回车发送，↑/↓ 历史，Ctrl+H/h 同步切换 input/view 的 ascii/hex；ascii 支持 `\r \n \t \0 \\ \xNN` 转义 |
+| 人工输入到串口 | GUI 显示区末尾直接输入，回车发送，↑/↓ 历史，Ctrl+H/h 同步切换 input/view 的 ASCII/Hex；文本保留 UTF-8 并支持 `\r \n \t \0 \\ \xNN` 转义，行尾由 EOL 设置 |
 | 日志文件保存 | 环形缓冲防丢（计数不静默丢）+ 异步落盘 + 按大小轮转 + 按天数清理，固定 UTF-8，带时间戳 + TX/RX/STATUS 方向 |
-| TUI | ratatui：数据视图（hex/ascii 切换）、输入区、状态栏、帮助栏 |
-| ASCII 视图 ANSI 颜色 | 解析设备输出里的 SGR 序列真实上色（16/256/真彩色、粗体/下划线/反显等）；跨数据包保持颜色状态，拆包的 `ESC[3`+`2m` 也能正确识别；hex 视图仍显示原始字节 |
+| GUI | 原生串口/波特率组合框、连接按钮、RichEdit 显示/输入、串口与 MCP 状态栏 |
+| ASCII 视图 ANSI 颜色 | GUI 显示 SGR 前景色（16/256/真彩色），跨包保留 UTF-8/ANSI 状态；时间戳降低对比度；Hex 显示原始字节。GUI 不模拟清屏/光标控制或粗体/下划线/反显 |
 | MCP server | rmcp streamable HTTP，独立端口，与 TUI 不抢终端，人工与 AI 共用 TX 队列 |
 | Win11 支持 | serial2 Windows 后端 + 自动重连（设备拔出/休眠恢复） |
 
 ## 构建
 
 ```powershell
-cargo build --release
-# 或仅 TUI：cargo build --no-default-features --features tui
+cargo build --release --offline
+# 或旧 TUI + MCP：cargo build --release --offline --no-default-features --features tui,mcp
 # 或仅 MCP：cargo build --no-default-features --features mcp
 ```
+
+`.cargo/config.toml` 为 Windows x64 GNU/MSVC 配置静态 CRT；GNU 额外传递 `-static`。Rust 代码及第三方库编入 EXE，系统 DLL（User32、GDI、DWM、Winsock、系统 CRT、系统自带 `Msftedit.dll` 等）仍由 Windows 提供，无需附带 VC++、GCC、Qt 或 WebView 运行库。可用 `objdump -p target/release/serial_mcp_tui.exe` 检查 PE 导入表。默认 GUI 构建为 Windows GUI 子系统；需要控制台帮助/旧 TUI 时使用不带 `gui` feature 的构建。
+
+`build.rs` 将 `gui.manifest` 嵌入 EXE，启用系统 Common Controls v6 样式与系统 DPI 感知；GNU 构建需要工具链自带的 `windres`，MSVC 构建需要 Windows SDK 的 `rc.exe`。这些是构建工具，不随运行程序分发。GUI 默认构建不启用终端输入后端，ANSI 解析只复用 ratatui 的文本/样式数据类型。
+
+验证：`cargo test --offline --all-features` 覆盖原生隐藏 RichEdit、GUI 编码/跨包显示、旧 TUI 和 MCP；`./verify-restart.ps1` 验证独立 MCP 进程真实重启，`./verify-restart.ps1 -Mode both` 另外检查重启前后的真实 GUI 窗口。原生控件测试不访问真实串口、不覆盖剪贴板，不代表长期运行验证。
 
 ## 运行
 
 ```powershell
-# TUI + MCP 同时运行（默认）
+# GUI + MCP 同时运行（默认）
 .\target\release\serial_mcp_tui.exe --port COM3 --baud 115200
 
-# 仅 TUI（人工调试）
-.\target\release\serial_mcp_tui.exe --mode tui --port COM3
+# 仅 GUI（人工调试）
+.\target\release\serial_mcp_tui.exe --mode gui --port COM3
 
 # 仅 MCP server（给 AI 用，走 HTTP，不占用终端）
 .\target\release\serial_mcp_tui.exe --mode mcp --mcp-port 8010
@@ -41,7 +47,7 @@ cargo build --release
 |---|---|---|
 | `-p, --port` | 空 | 串口号（如 COM3） |
 | `-b, --baud` | 115200 | 波特率 |
-| `--mode` | both | tui / mcp / both |
+| `--mode` | both | gui / mcp / both；tui 需要旧 TUI feature，both 优先选择 GUI |
 | `--log-dir` | logs | 日志目录 |
 | `--log-rotate` | 10485760 | 单文件轮转上限（字节） |
 | `--log-keep-days` | 30 | 日志保留天数 |
@@ -59,7 +65,7 @@ cargo build --release
 # stm32.toml
 port = "COM9"
 baud = 9600
-mode = "tui"
+mode = "both"
 log_dir = "logs"
 log_rotate = 10485760
 log_flush_bytes = 4096
@@ -88,7 +94,17 @@ mcp_port = 8010
 
 **边界（文档约束）**：热更新只应用**串口参数**（port/baud）；日志参数（`log_dir/log_rotate/log_keep_days/log_flush_*/mcp_port`）**重启进程生效**——环形缓冲与落盘线程在启动时固定，避免并发竞态。配置解析失败（文件缺失/TOML 非法）直接退出并报错，不带病运行。
 
-## TUI 按键
+## GUI 操作
+
+顶部选择或输入串口、波特率，点击 `Connect` / `Disconnect`；`Refresh` 刷新端口列表（后台也每秒刷新）。串口状态为 `CONNECTED`、`DISCONNECTED`、`NOT_FOUND`，操作错误显示在状态旁；`log:` 显示当前文本日志文件名。底部单行显示完整 MCP 服务/会话信息。
+
+直接在显示区末尾设备提示符之后输入，不设独立输入行。`Enter` 等待串口驱动写入回执后清空草稿，失败保留；空输入在文本模式下也发送配置行尾。`Ctrl+H` 切换 ASCII/Hex，`Ctrl+E` 循环行尾，`Ctrl+K` 或 `Clear` 清空显示并保留草稿，`Ctrl+R` 按顶部当前端口/波特率连接，`Ctrl+X` 退出。↑/↓ 浏览命令历史；左右键、Home/End 使用原生编辑行为，鼠标滚轮和原生横纵滚动条查看历史/长行。窗口最顶部独立显示快捷键提示，启动后输入焦点位于显示区末尾。
+
+鼠标拖动选择文字，右键或 `Ctrl+C` 复制；历史不可修改，点击历史后直接打字会跳至草稿末尾。选中历史期间暂停显示刷新，文件日志和 MCP 继续；超出广播容量时提示显示跳过事件，原始文件日志不依赖这个广播。接收插入在草稿之前，保留原生选区与阅读滚动位置。跨接收批次的撤销与 Ctrl+Backspace 删词被禁用，以保护历史/草稿边界。
+
+为兼容现有配置，GUI 继续读取 `[tui]` 下的 `theme`、`line_ending`、`input_hex`/`hex_view`、`max_lines`。GUI 输入与显示统一模式，`input_hex` 优先；`max_lines` 在 GUI 中换算为历史字符预算（每行 1024 个 UTF-16 单位，限制 50–2000 行预算），达到预算后按整行裁剪前半段。主题只作用于文本显示区，工具栏使用系统控件；修改主题后重启，日志仍为纯文本。
+
+## 旧 TUI 按键（仅 tui feature 构建）
 
 | 按键 | 功能 |
 |---|---|
@@ -131,7 +147,7 @@ TUI 时间戳使用正文与背景的中间色，降低约一半对比度；正�
 
 端点为 `http://127.0.0.1:<port>/mcp`。8 个工具：`list_ports / open / close / send / read / set_dtr_rts / export_log / restart`。
 
-`restart` 无参数，重启整个串口工具。返回 `restart scheduled` 仅表示已安排；预留一秒发送回复后，TUI 恢复终端、关闭串口，并最多等待三秒确认日志队列尾部写入与文件刷新（不等同于断电持久化）。辅助进程隐藏运行，最多等待旧进程退出 30 秒，然后使用原命令行参数、工作目录启动可见的新控制台，启动时重新读取配置文件；未保存的输入和内存历史不会恢复。重复请求返回 `restart already scheduled`，不会重复启动；辅助进程创建失败返回错误并允许重试。旧 MCP 会话会断开，客户端必须重新连接；成功回复不保证新进程启动成功。此工具与现有串口工具共用 HTTP 访问权限，能够访问该端点的客户端也能够重启应用。
+`restart` 无参数，重启整个串口工具。返回 `restart scheduled` 仅表示已安排；预留一秒发送回复后，关闭界面/串口，最多等待三秒确认日志队列尾部写入与文件刷新（不等同于断电持久化）。辅助进程隐藏运行，最多等待旧进程退出 30 秒，然后使用原命令行参数、工作目录重新启动；GUI 构建不创建控制台，旧 TUI 构建创建可见控制台。启动时重新读取配置文件；未保存的输入和内存历史不会恢复。重复请求返回 `restart already scheduled`，不会重复启动；辅助进程创建失败返回错误并允许重试。旧 MCP 会话会断开，客户端必须重新连接；成功回复不保证新进程启动成功。此工具与现有串口工具共用 HTTP 访问权限，能够访问该端点的客户端也能够重启应用。
 
 Windows 下先运行 `cargo build --release --offline`，再运行 `./verify-restart.ps1` 可验证真实进程的 MCP 重启和重新连接。脚本使用独立临时端口、无效串口名，不连接真实设备；结束时只清理该测试实例。单元测试另外验证日志结束屏障前未换行的尾部文本已写入文件。这些检查不代表长期运行或真实串口验证。
 
@@ -167,7 +183,7 @@ claude mcp add serial -- "C:\path\to\serial_mcp_tui.exe" --mode mcp
 
 ## 发布产物
 
-`dist/` 是可直接分发的目录（`cargo build --release` 后产出）：
+`dist/` 是可直接分发的目录（先 `cargo build --release`，再将 `target/release/serial_mcp_tui.exe` 与 README 复制到此目录）：
 
 ```
 dist/
@@ -178,7 +194,7 @@ dist/
 
 双击 `serial_mcp_tui.exe` 即可启动（自动读取同目录 `config.toml`，无配置文件则默认 `--mode both`）。
 
-启动时优先连接配置或命令行指定的端口；未指定且系统只有一个可用串口时自动连接，波特率使用合并后的配置。存在多个串口时通过 Ctrl+O 选择。
+启动时优先连接配置或命令行指定的端口；未指定且系统只有一个可用串口时自动连接，波特率使用合并后的配置。存在多个串口时通过 GUI 顶部组合框选择；旧 TUI 使用 Ctrl+O。
 
 ## 模块结构
 
@@ -186,6 +202,7 @@ dist/
 src/
 ├── main.rs         # CLI + 配置合并（命令行>配置>默认）+ 模式编排 + watch 热加载
 ├── config.rs       # TOML 配置文件解析与优先级合并
+├── gui.rs          # WinAPI 原生窗口 / RichEdit / 输入边界保护（feature: gui）
 ├── codec.rs        # hex 解析 + ascii 转义解码（TUI/MCP 共用）
 ├── serial_core.rs  # 串口核心：双向收发 / TX队列 / DTR·RTS / 自动重连 / 事件广播
 ├── logger.rs       # 环形缓冲 + 异步落盘 + 按大小轮转 + 按天清理 + 双阈值

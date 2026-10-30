@@ -545,8 +545,15 @@ mod tests {
         let l = LogWriter::start(cfg(dir.clone(), 1024 * 1024, 1024 * 1024, 20), 1024);
         l.push(Direction::Tx, b"AB".to_vec());
         l.push(Direction::Rx, vec![0x01, 0x02]);
-        // flush_bytes=1MB 未达 → 由 flush_interval=20ms 超时触发
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // flush_bytes=1MB 未达 → 由 flush_interval=20ms 超时触发。
+        // 按内容条件等待，避免静态依赖编译并行占用 CPU 时固定 200ms 产生误报。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let ready = fs::read_dir(&dir).ok().into_iter().flatten().filter_map(Result::ok)
+                .any(|entry| fs::read_to_string(entry.path()).unwrap_or_default().contains("] \\x01\\x02"));
+            if ready || std::time::Instant::now() >= deadline { break; }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         let files: Vec<_> = fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).collect();
         assert!(!files.is_empty(), "log file should exist");
         let content = fs::read_to_string(files[0].path()).unwrap();

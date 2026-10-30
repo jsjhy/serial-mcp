@@ -19,7 +19,7 @@ pub struct FileConfig {
     pub port: Option<String>,
     /// 串口波特率；省略时由装配层回退到 115200。
     pub baud: Option<u32>,
-    /// tui / mcp / both（非法值回退 both）
+    /// gui / tui / mcp / both（非法值回退 both，both 优先使用编译启用的 GUI）
     pub mode: Option<String>,
     /// 日志目录；相对路径按进程工作目录解析，不自动相对配置文件目录。
     pub log_dir: Option<PathBuf>,
@@ -33,11 +33,11 @@ pub struct FileConfig {
     pub log_flush_ms: Option<u64>,
     /// MCP server HTTP 端口（扁平字段，兼容旧配置）
     pub mcp_port: Option<u16>,
-    /// TUI 专属配置（`[tui]` 子表）
+    /// 界面配置（GUI 兼容沿用 `[tui]` 子表）
     pub tui: Option<TuiConfig>,
 }
 
-/// TUI 专属配置（`[tui]` 子表，字段全部可选）。
+/// 界面配置（`[tui]` 子表，字段全部可选）；GUI 同步编码模式，input_hex 优先。
 #[derive(Deserialize, Default, Debug, Clone)]
 pub struct TuiConfig {
     /// 界面配色：dark / light / nord / solarized，默认 dark。
@@ -48,7 +48,7 @@ pub struct TuiConfig {
     pub hex_view: Option<bool>,
     /// 输入编码默认模式：true=hex，false=ascii（默认）
     pub input_hex: Option<bool>,
-    /// 视图最大行数（默认 500）
+    /// TUI 最大行数；GUI 换算为每行 1024 个 UTF-16 单位的历史字符预算（默认 500）。
     pub max_lines: Option<usize>,
 }
 

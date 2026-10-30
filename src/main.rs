@@ -1,20 +1,25 @@
-//! serial-mcp-tui：串口调试工具。
+//! 串口调试工具：默认 WinAPI GUI + MCP，可选旧 TUI 构建。
 //!
 //! 能力：人工输入（TX）/ 输出（RX） / 环形缓冲日志（防丢+轮转） / TUI / MCP server（HTTP）。
 //! 平台：Win11（Windows Terminal 下运行 TUI 效果最佳）。
 //! 参数：命令行 > 配置文件（--config xxx.toml）> 内置默认。
 //!
 //! 启动顺序：解析 CLI → 发现/读取配置 → 合并参数 → 初始化诊断输出和 Tokio →
-//! 创建日志线程与串口核心 → 尝试连接 → 启动配置监视、MCP 和 TUI。
-//! TUI 的键盘读取是阻塞 API，必须放在单独的 OS 线程；MCP 与配置监视运行在 Tokio。
+//! 创建日志线程与串口核心 → 尝试连接 → 启动配置监视、MCP 和 GUI（或旧 TUI）。
+//! GUI 消息循环与 TUI 键盘读取各自使用独立 OS 线程；MCP 与配置监视运行在 Tokio。
 //! TUI 模式等待界面退出通知后返回；仅 MCP 模式轮询重启信号保持服务存活。
 //! 本文件负责装配依赖，串口读写、数据编码和文件格式分别由对应模块负责。
 
+#![cfg_attr(all(windows, feature = "gui", not(test)), windows_subsystem = "windows")]
+
+#[cfg(any(feature = "tui", feature = "gui"))]
 mod ansi;
 mod codec;
 mod config;
 mod logger;
 mod restart;
+#[cfg(feature = "gui")]
+mod gui;
 mod serial_core;
 #[cfg(feature = "tui")]
 mod tui;
@@ -95,11 +100,24 @@ enum Mode {
     Tui,
     /// 仅 MCP server
     Mcp,
+    /// 仅 WinAPI GUI；both 在启用 GUI 的构建中选择 GUI + MCP。
+    Gui,
 }
 
 /// 进程入口。启动配置错误直接返回/退出，串口打开失败则允许界面继续运行以便重试。
 /// MCP 后台任务失败会写入共享状态，供 TUI 显示；不强制关闭人工调试界面。
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 隐藏辅助进程等待失败时必须直接退出，不能用模态错误框无限延长其生命周期。
+    #[cfg(feature = "gui")]
+    let helper = std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--internal-restart-helper"));
+    let result = application();
+    #[cfg(feature = "gui")]
+    if let Err(error) = &result { if !helper { gui::show_error(&error.to_string()); } }
+    result
+}
+
+/// 界面与服务共用同一核心；GUI 的消息循环独占一个 OS 线程，不阻塞 Tokio。
+fn application() -> Result<(), Box<dyn std::error::Error>> {
     if restart::run_helper()? { return Ok(()); }
     let matches = Cli::command().get_matches();
     let cli = Cli::from_arg_matches(&matches)?;
@@ -120,8 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(p) => match load_file_config(p) {
             Ok(cfg) => Some(cfg),
             Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(1);
+                return Err(e.into());
             }
         },
         None => None,
@@ -147,6 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match fc.and_then(|f| f.mode.as_deref()) {
             Some("tui") => Mode::Tui,
             Some("mcp") => Mode::Mcp,
+                Some("gui") => Mode::Gui,
             _ => Mode::Both,
         }
     };
@@ -184,7 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // TUI 独占终端；后台诊断写文件，防止破坏 ratatui 的屏幕差分状态。
-    let diagnostics: Box<dyn std::io::Write + Send> = if cfg!(feature = "tui") && matches!(mode, Mode::Both | Mode::Tui) {
+    let diagnostics: Box<dyn std::io::Write + Send> = if cfg!(feature = "gui") || (cfg!(feature = "tui") && matches!(mode, Mode::Both | Mode::Tui)) {
         std::fs::create_dir_all(&log_dir)?;
         Box::new(std::fs::OpenOptions::new().create(true).append(true).open(log_dir.join("application.log"))?)
     } else {
@@ -202,7 +220,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
     // Handle 只提供进入运行时的能力，真正的 Runtime 由 main 持有，覆盖所有工作线程的运行期。
-    #[cfg(feature = "tui")]
+    #[cfg(any(feature = "tui", feature = "gui"))]
     let handle = rt.handle().clone();
 
     rt.block_on(async move {
@@ -287,7 +305,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        let need_tui = matches!(mode, Mode::Both | Mode::Tui);
+        let need_tui = matches!(mode, Mode::Tui) || (matches!(mode, Mode::Both) && !cfg!(feature = "gui"));
+        let need_gui = matches!(mode, Mode::Gui) || (matches!(mode, Mode::Both) && cfg!(feature = "gui"));
         let need_mcp = matches!(mode, Mode::Both | Mode::Mcp);
         #[allow(unused_mut)]
         let mut started = false;
@@ -337,8 +356,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tracing::warn!("this build has no `tui` feature: TUI not started");
         }
 
+        #[cfg(feature = "gui")]
+        let (gui_exit_tx, gui_exit_rx) = tokio::sync::oneshot::channel();
+        #[cfg(feature = "gui")]
+        if need_gui {
+            let gui_core = core.clone();
+            let gui_handle = handle.clone();
+            let gui_cfg = fc.and_then(|f| f.tui.clone()).unwrap_or_default();
+            std::thread::Builder::new().name("winapi-gui".into()).spawn(move || {
+                let _ = gui_exit_tx.send(gui::run(gui_handle, gui_core, gui_cfg));
+            })?;
+            started = true;
+        }
+        #[cfg(not(feature = "gui"))]
+        if need_gui { tracing::warn!("this build has no `gui` feature"); }
+
         if !started {
-            return Err("nothing to run: rebuild with the `tui` and/or `mcp` feature".into());
+            return Err("nothing to run: rebuild with the requested gui/tui/mcp feature".into());
+        }
+        #[cfg(feature = "gui")]
+        if need_gui {
+            let result = gui_exit_rx.await?;
+            core.close().await;
+            log.shutdown(std::time::Duration::from_secs(3))?;
+            result?;
+            return Ok(());
         }
         #[cfg(feature = "tui")]
         if need_tui {
